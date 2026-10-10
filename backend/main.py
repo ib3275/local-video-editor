@@ -3,6 +3,7 @@ Local Video Editor — Companion Backend
 Single-file FastAPI worker that runs on the user's PC.
 
 Transcription backend: faster-whisper (CTranslate2).
+Ollama is proxied through this backend so the frontend never needs CORS.
 """
 
 import os
@@ -16,6 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Generator
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,7 +32,6 @@ from faster_whisper import WhisperModel
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEEPSEEK_MODEL = "deepseek-r1:8b"
 
-# faster-whisper model size: "tiny", "base", "small", "medium", "large-v3"
 WHISPER_MODEL = "base"
 
 DEFAULT_VIDEO_DIR = Path.home() / "LocalVideoEditor" / "videos"
@@ -40,7 +41,7 @@ DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 #  APP
 # ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Local Video Editor Backend", version="1.2.0")
+app = FastAPI(title="Local Video Editor Backend", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,6 +77,21 @@ async def status():
         "whisper": WHISPER_MODEL,
         "video_dir": RUNTIME["video_dir"],
     }
+
+
+# ──────────────────────────────────────────────────────────────
+#  OLLAMA PROXY  (so the browser never has to talk to :11434)
+# ──────────────────────────────────────────────────────────────
+
+@app.get("/ollama/tags")
+async def ollama_tags():
+    """Pass-through to Ollama's /api/tags. Frontend pings this instead."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags")
+            return JSONResponse(content=r.json(), status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(503, f"Ollama unreachable: {e}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -226,7 +242,7 @@ def cut_and_concat(video_path: str, segments: list, output_path: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────
-#  WHISPER TRANSCRIPTION  (faster-whisper / CTranslate2)
+#  WHISPER TRANSCRIPTION
 # ──────────────────────────────────────────────────────────────
 
 def _load_whisper() -> WhisperModel:
