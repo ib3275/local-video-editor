@@ -29,40 +29,49 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
 
     return {
       full:
-        // 1. Install prerequisites first (idempotent)
+        // 1. Prerequisites
         `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements; ` +
         `winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements; ` +
         `winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements; ` +
 
-        // 2. Refresh PATH so newly-installed tools are usable in this session
+        // 2. PATH refresh
         `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
 
-        // 3. Allow venv activation for this shell only
+        // 3. ExecutionPolicy for venv activation
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
 
-        // 4. Clone FIRST — before creating any subfolders, or git clone refuses
-        //    a non-empty destination.
+        // 4. Refresh code if no .git present. Preserve ollama-models at all costs.
+        //    git clone refuses a non-empty destination, so we clone to a temp
+        //    sibling then move files in — ollama-models is never touched.
         `if (-not (Test-Path (Join-Path ${repoQuoted} '.git'))) { ` +
-          `if (Test-Path ${repoQuoted}) { Remove-Item -Recurse -Force ${repoQuoted} }; ` +
-          `git clone ${REPO_URL} ${repoQuoted} ` +
+          `if (Test-Path ${repoQuoted}) { ` +
+            `Get-ChildItem ${repoQuoted} -Exclude 'ollama-models' -Force | Remove-Item -Recurse -Force; ` +
+          `} else { ` +
+            `New-Item -ItemType Directory -Force -Path ${repoQuoted} | Out-Null; ` +
+          `}; ` +
+          `$tmp = "${repoQuoted}.tmp-clone"; ` +
+          `if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }; ` +
+          `git clone ${REPO_URL} $tmp; ` +
+          `Get-ChildItem $tmp -Force | Move-Item -Destination ${repoQuoted}; ` +
+          `Remove-Item -Recurse -Force $tmp ` +
         `}; ` +
 
-        // 5. NOW create the models folder + set OLLAMA_MODELS
+        // 5. Models folder + env var
         `$modelsPath = ${modelsQuoted}; ` +
         `New-Item -ItemType Directory -Force -Path $modelsPath | Out-Null; ` +
         `[Environment]::SetEnvironmentVariable('OLLAMA_MODELS', $modelsPath, 'User'); ` +
         `$env:OLLAMA_MODELS = $modelsPath; ` +
 
-        // 6. Restart Ollama so it inherits the new model path
+        // 6. Restart Ollama hidden so it inherits OLLAMA_MODELS
         `Get-Process -Name 'ollama*' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
         `Start-Sleep -Milliseconds 800; ` +
         `Start-Process -WindowStyle Hidden -FilePath 'ollama' -ArgumentList 'serve' -ErrorAction SilentlyContinue; ` +
         `Start-Sleep -Seconds 5; ` +
 
-        // 7. Pull the model — lands in the folder we just configured
+        // 7. Model (instant no-op if already present)
         `ollama pull ${MODEL_NAME}; ` +
 
-        // 8. Backend setup
+        // 8. Backend
         `cd ${backendQuoted}; ` +
         `py -3 -m venv .venv; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
@@ -83,43 +92,39 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
     }
   }
 
+  // macOS / Linux — full replacement, preserving models on re-clone
   const repoQuoted = quotePath(p, 'mac')
   const backendQuoted = quotePath(`${p}/backend`, 'mac')
   const modelsQuoted = quotePath(`${p}/ollama-models`, 'mac')
 
   return {
     full:
-      // 1. Install prerequisites
       `brew install ffmpeg ollama python@3.12; ` +
-
-      // 2. Clone FIRST, before creating the models folder
       `if [ ! -d ${repoQuoted}/.git ]; then ` +
-        `rm -rf ${repoQuoted}; ` +
-        `git clone ${REPO_URL} ${repoQuoted}; ` +
+        `if [ -d ${repoQuoted} ]; then ` +
+          `find ${repoQuoted} -mindepth 1 -maxdepth 1 ! -name 'ollama-models' -exec rm -rf {} +; ` +
+        `else ` +
+          `mkdir -p ${repoQuoted}; ` +
+        `fi; ` +
+        `tmp="${repoQuoted}.tmp-clone"; ` +
+        `rm -rf "$tmp"; ` +
+        `git clone ${REPO_URL} "$tmp"; ` +
+        `mv "$tmp"/* "$tmp"/.[!.]* ${repoQuoted}/ 2>/dev/null || true; ` +
+        `rm -rf "$tmp"; ` +
       `fi; ` +
-
-      // 3. Create models folder + persist OLLAMA_MODELS
       `mkdir -p ${modelsQuoted}; ` +
       `export OLLAMA_MODELS=${modelsQuoted}; ` +
       `grep -q "OLLAMA_MODELS" ~/.zshrc 2>/dev/null || echo 'export OLLAMA_MODELS='${modelsQuoted} >> ~/.zshrc; ` +
-
-      // 4. Restart Ollama detached (nohup + disown so it survives terminal close)
       `pkill -f "ollama serve" 2>/dev/null || true; ` +
       `sleep 1; ` +
       `nohup ollama serve > /dev/null 2>&1 & disown; ` +
       `sleep 4; ` +
-
-      // 5. Pull the model
       `ollama pull ${MODEL_NAME}; ` +
-
-      // 6. Backend setup
       `cd ${backendQuoted}; ` +
       `python3 -m venv .venv; ` +
       `source .venv/bin/activate; ` +
       `python3 -m pip install --upgrade pip; ` +
       `python3 -m pip install -r requirements.txt; ` +
-
-      // 7. Launch
       `python3 main.py`,
 
     restart:
