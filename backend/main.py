@@ -29,7 +29,7 @@ from faster_whisper import WhisperModel
 # ──────────────────────────────────────────────────────────────
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-DEEPSEEK_MODEL = "deepseek-r1:8b-qwen-distill-q4_K_M"
+DEEPSEEK_MODEL = "deepseek-r1:8b"
 
 # faster-whisper model size: "tiny", "base", "small", "medium", "large-v3"
 WHISPER_MODEL = "base"
