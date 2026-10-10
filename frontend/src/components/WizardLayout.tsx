@@ -6,8 +6,8 @@ import EditorDashboard from './EditorDashboard'
 
 const STEPS = [
   { id: 1, title: 'Check Your Computer', icon: '💻' },
-  { id: 2, title: 'Choose Folders', icon: '📁' },
-  { id: 3, title: 'Install Everything', icon: '⚡' },
+  { id: 2, title: 'Install the Engine', icon: '⚡' },
+  { id: 3, title: 'Choose Folders', icon: '📁' },
   { id: 4, title: 'Start Editing', icon: '🎬' },
 ]
 
@@ -18,32 +18,39 @@ export default function WizardLayout() {
 
   // ── Auto-connection pings ──────────────────────────────────
   useEffect(() => {
+    let cancelled = false
+
     const check = async () => {
       try {
         const [statusRes, ollamaRes] = await Promise.all([
-          fetch('http://localhost:8000/status'),
-          fetch('http://localhost:11434/api/tags'),
+          fetch('http://localhost:8000/status', { signal: AbortSignal.timeout(1500) }),
+          fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(1500) }),
         ])
-        if (statusRes.ok && ollamaRes.ok) {
+        if (!cancelled && statusRes.ok && ollamaRes.ok) {
           setBackendReady(true)
-          if (currentStep < 4) setCurrentStep(4)
         }
       } catch {
-        setBackendReady(false)
+        if (!cancelled) setBackendReady(false)
       }
     }
 
     check()
     const interval = setInterval(check, 2000)
-    return () => clearInterval(interval)
-  }, [currentStep])
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
 
   const handleHardwareComplete = useCallback(() => setCurrentStep(2), [])
-  const handleDirectoryComplete = useCallback((p: { videoPath: string; ollamaPath: string }) => {
-    setPaths(p)
-    setCurrentStep(3)
-  }, [])
-  const handleInstallComplete = useCallback(() => setCurrentStep(4), [])
+  const handleInstallComplete = useCallback(() => setCurrentStep(3), [])
+  const handleDirectoryComplete = useCallback(
+    (p: { videoPath: string; ollamaPath: string }) => {
+      setPaths(p)
+      setCurrentStep(4)
+    },
+    []
+  )
 
   return (
     <div className="min-h-screen flex flex-col items-center px-4 py-10">
@@ -75,14 +82,30 @@ export default function WizardLayout() {
       {/* Step content */}
       <main className="w-full max-w-3xl">
         {currentStep === 1 && <HardwareCheck onComplete={handleHardwareComplete} />}
-        {currentStep === 2 && <DirectorySelector onComplete={handleDirectoryComplete} />}
-        {currentStep === 3 && <TerminalInstaller onComplete={handleInstallComplete} />}
-        {currentStep === 4 && <EditorDashboard backendReady={backendReady} paths={paths} />}
+        {currentStep === 2 && (
+          <TerminalInstaller
+            onComplete={handleInstallComplete}
+            backendReady={backendReady}
+          />
+        )}
+        {currentStep === 3 && (
+          <DirectorySelector
+            onComplete={handleDirectoryComplete}
+            backendReady={backendReady}
+          />
+        )}
+        {currentStep === 4 && (
+          <EditorDashboard backendReady={backendReady} paths={paths} />
+        )}
       </main>
 
       {/* Connection badge */}
-      <div className="fixed bottom-4 right-4 flex items-center gap-2 text-xs">
-        <span className={`w-2 h-2 rounded-full ${backendReady ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'}`} />
+      <div className="fixed bottom-4 right-4 flex items-center gap-2 text-xs bg-slate-900/80 backdrop-blur px-3 py-2 rounded-full border border-slate-800">
+        <span
+          className={`w-2 h-2 rounded-full ${
+            backendReady ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'
+          }`}
+        />
         <span className="text-slate-400">
           {backendReady ? 'Backend Connected' : 'Waiting for local backend…'}
         </span>
