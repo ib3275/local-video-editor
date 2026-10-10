@@ -25,59 +25,51 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
   if (os === 'windows') {
     const repoQuoted = quotePath(p, 'windows')
     const backendQuoted = quotePath(`${p}\\backend`, 'windows')
+    // quotePath already wraps paths with spaces in single quotes — do NOT
+    // add extra quotes in the template below, or you get ''path'' bugs.
     const modelsQuoted = quotePath(`${p}\\ollama-models`, 'windows')
 
     return {
       full:
-        // 1. Point Ollama's model storage at the chosen path BEFORE installing
-        `$modelsPath = '${modelsQuoted}'; ` +
+        `$modelsPath = ${modelsQuoted}; ` +
         `New-Item -ItemType Directory -Force -Path $modelsPath | Out-Null; ` +
         `[Environment]::SetEnvironmentVariable('OLLAMA_MODELS', $modelsPath, 'User'); ` +
         `$env:OLLAMA_MODELS = $modelsPath; ` +
 
-        // 2. Install prerequisites (idempotent)
         `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements; ` +
         `winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements; ` +
         `winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements; ` +
 
-        // 3. Refresh PATH in this session
         `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
 
-        // 4. Allow venv activation for this shell only
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
 
-        // 5. Clone (skip if exists)
         `if (-not (Test-Path ${repoQuoted})) { git clone ${REPO_URL} ${repoQuoted} }; ` +
 
-        // 6. Restart Ollama so it inherits the new OLLAMA_MODELS value
         `Get-Process -Name 'ollama*' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
         `Start-Sleep -Milliseconds 800; ` +
         `Start-Process "$env:LOCALAPPDATA\\Programs\\Ollama\\ollama app.exe" -ErrorAction SilentlyContinue; ` +
         `Start-Sleep -Seconds 5; ` +
 
-        // 7. Pull the DeepSeek model — lands in the folder we just configured
         `ollama pull ${MODEL_NAME}; ` +
 
-        // 8. Backend: create venv, install deps
         `cd ${backendQuoted}; ` +
         `py -3 -m venv .venv; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python -m pip install --upgrade pip; ` +
         `python -m pip install -r requirements.txt; ` +
 
-        // 9. Launch
         `python main.py`,
 
       restart:
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
-        `$env:OLLAMA_MODELS = '${modelsQuoted}'; ` +
+        `$env:OLLAMA_MODELS = ${modelsQuoted}; ` +
         `cd ${backendQuoted}; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python main.py`,
     }
   }
 
-  // macOS / Linux
   const repoQuoted = quotePath(p, 'mac')
   const backendQuoted = quotePath(`${p}/backend`, 'mac')
   const modelsQuoted = quotePath(`${p}/ollama-models`, 'mac')
