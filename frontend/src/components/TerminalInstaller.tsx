@@ -9,50 +9,71 @@ interface Props {
 const REPO_URL = 'https://github.com/ib3275/local-video-editor.git'
 
 // ──────────────────────────────────────────────────────────────
-//  Path quoting — protects against spaces and special characters
+//  Path quoting — makes spaces and special chars safe in shells
 // ──────────────────────────────────────────────────────────────
 function quotePath(p: string, os: 'windows' | 'mac'): string {
   if (!p) return p
   if (os === 'windows') {
-    // PowerShell: single-quote anything with spaces or shell-sensitive chars
     if (/[\s'"`$(){}[\]]/.test(p)) return `'${p.replace(/'/g, "''")}'`
     return p
   }
-  // Bash: double-quote anything risky
   if (/[\s'"`$(){}[\]&|;<>]/.test(p)) return `"${p.replace(/"/g, '\\"')}"`
   return p
 }
 
 function buildCommands(installPath: string, os: 'windows' | 'mac') {
   const p = (installPath || 'local-editor').replace(/[/\\]+$/, '')
-  const q = quotePath(p, os)
 
   if (os === 'windows') {
+    // Build the FULL path first, THEN quote it whole. (Old bug: quoted the
+    // folder, then tacked on \backend outside the quotes → cd saw two args.)
+    const repoQuoted = quotePath(p, 'windows')
+    const backendQuoted = quotePath(`${p}\\backend`, 'windows')
+
     return {
       full:
-        `git clone ${REPO_URL} ${q}; ` +
-        `cd ${q}\\backend; ` +
-        `python -m venv .venv; ` +
+        // 1. Install prerequisites (idempotent — skips if already present)
+        `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements; ` +
+        `winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements; ` +
+        `winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements; ` +
+        // 2. Refresh PATH in this session so freshly-installed tools are visible
+        `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
+        // 3. Allow venv activation for this shell only (default policy blocks it)
+        `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
+        // 4. Clone only if the folder doesn't exist yet
+        `if (-not (Test-Path ${repoQuoted})) { git clone ${REPO_URL} ${repoQuoted} }; ` +
+        // 5. Enter backend, create venv via py launcher (bypasses Windows
+        //    Store python.exe alias stub that breaks `python` for new users)
+        `cd ${backendQuoted}; ` +
+        `py -3 -m venv .venv; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
-        `pip install -r requirements.txt; ` +
+        `python -m pip install --upgrade pip; ` +
+        `python -m pip install -r requirements.txt; ` +
         `python main.py`,
       restart:
-        `cd ${q}\\backend; ` +
+        `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
+        `cd ${backendQuoted}; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python main.py`,
     }
   }
+
+  // macOS / Linux
+  const repoQuoted = quotePath(p, 'mac')
+  const backendQuoted = quotePath(`${p}/backend`, 'mac')
+
   return {
     full:
-      `brew install ffmpeg ollama; ` +
-      `git clone ${REPO_URL} ${q}; ` +
-      `cd ${q}/backend; ` +
+      `brew install ffmpeg ollama python@3.12; ` +
+      `if [ ! -d ${repoQuoted} ]; then git clone ${REPO_URL} ${repoQuoted}; fi; ` +
+      `cd ${backendQuoted}; ` +
       `python3 -m venv .venv; ` +
       `source .venv/bin/activate; ` +
-      `pip3 install -r requirements.txt; ` +
+      `python3 -m pip install --upgrade pip; ` +
+      `python3 -m pip install -r requirements.txt; ` +
       `python3 main.py`,
     restart:
-      `cd ${q}/backend; ` +
+      `cd ${backendQuoted}; ` +
       `source .venv/bin/activate; ` +
       `python3 main.py`,
   }
@@ -329,7 +350,14 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
               <strong>still open</strong>. Closing it stops the engine.
             </li>
             <li>
-              Look at that window — if you see a red error, copy the last few
+              If you saw <em>"Python was not found; run without arguments to
+              install from the Microsoft Store"</em>, that's the Windows Store
+              alias stub — not a real Python. The command already installs
+              Python via winget; just close and reopen your terminal, then
+              re-run the command.
+            </li>
+            <li>
+              Look at that terminal — if you see a red error, copy the last few
               lines and search them online.
             </li>
             <li>

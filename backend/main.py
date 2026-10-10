@@ -1,6 +1,8 @@
 """
 Local Video Editor — Companion Backend
 Single-file FastAPI worker that runs on the user's PC.
+
+Transcription backend: faster-whisper (CTranslate2).
 """
 
 import os
@@ -20,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import ollama
+from faster_whisper import WhisperModel
 
 # ──────────────────────────────────────────────────────────────
 #  CONFIGURATION
@@ -27,7 +30,10 @@ import ollama
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEEPSEEK_MODEL = "deepseek-r1:8b-qwen-distill-q4_K_M"
-WHISPER_MODEL = "base"          # change to "small" or "medium" for better accuracy
+
+# faster-whisper model size: "tiny", "base", "small", "medium", "large-v3"
+WHISPER_MODEL = "base"
+
 DEFAULT_VIDEO_DIR = Path.home() / "LocalVideoEditor" / "videos"
 DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -35,7 +41,7 @@ DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 #  APP
 # ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Local Video Editor Backend", version="1.0.0")
+app = FastAPI(title="Local Video Editor Backend", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,11 +57,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Runtime configuration (mutated by the frontend)
 RUNTIME = {
     "video_dir": str(DEFAULT_VIDEO_DIR),
     "ollama_models_dir": None,
 }
+
+_whisper_cache: Optional[WhisperModel] = None
+
 
 # ──────────────────────────────────────────────────────────────
 #  HEALTH
@@ -66,18 +74,16 @@ async def status():
     return {
         "status": "ok",
         "model": DEEPSEEK_MODEL,
+        "whisper": WHISPER_MODEL,
         "video_dir": RUNTIME["video_dir"],
     }
 
+
 # ──────────────────────────────────────────────────────────────
-#  NATIVE FOLDER PICKER  (tkinter in a safe thread)
+#  NATIVE FOLDER PICKER
 # ──────────────────────────────────────────────────────────────
 
 def _ask_directory(title: str) -> str:
-    """
-    Runs tkinter's folder picker in a *fresh process* to avoid
-    thread-safety issues entirely. Returns the chosen path.
-    """
     script = f"""
 import tkinter as tk
 from tkinter import filedialog
@@ -126,7 +132,7 @@ async def browse_folder(request: Request):
 
 
 # ──────────────────────────────────────────────────────────────
-#  ENVIRONMENT UPDATE  (called silently by the frontend)
+#  ENVIRONMENT UPDATE
 # ──────────────────────────────────────────────────────────────
 
 @app.post("/utils/set-paths")
@@ -187,7 +193,6 @@ def ffmpeg_available() -> bool:
 
 
 def extract_audio(video_path: str, audio_path: str) -> None:
-    """Pull a 16‑kHz mono WAV track for Whisper."""
     subprocess.run(
         [
             "ffmpeg", "-y",
@@ -206,10 +211,6 @@ def cut_and_concat(
     segments: list[dict],
     output_path: str,
 ) -> None:
-    """
-    segments: [{"start": 0.0, "end": 3.5}, ...]
-    Uses FFmpeg's select filter to keep only the requested ranges.
-    """
     if not segments:
         shutil.copy(video_path, output_path)
         return
@@ -230,25 +231,44 @@ def cut_and_concat(
 
 
 # ──────────────────────────────────────────────────────────────
-#  WHISPER TRANSCRIPTION
+#  WHISPER TRANSCRIPTION  (faster-whisper / CTranslate2)
 # ──────────────────────────────────────────────────────────────
 
-def transcribe_audio(audio_path: str) -> list[dict]:
-    """
-    Returns [{"start": 0.0, "end": 3.2, "text": "Hello world"}, ...]
-    Uses openai-whisper locally (no API key needed).
-    """
-    import whisper
+def _load_whisper() -> WhisperModel:
+    global _whisper_cache
+    if _whisper_cache is not None:
+        return _whisper_cache
 
-    model = whisper.load_model(WHISPER_MODEL)
-    result = model.transcribe(audio_path, beam_size=5)
+    try:
+        _whisper_cache = WhisperModel(
+            WHISPER_MODEL, device="auto", compute_type="auto"
+        )
+    except Exception as e:
+        print(f"[whisper] GPU load failed ({e}); falling back to CPU.")
+        _whisper_cache = WhisperModel(
+            WHISPER_MODEL, device="cpu", compute_type="int8"
+        )
+
+    return _whisper_cache
+
+
+def transcribe_audio(audio_path: str) -> list[dict]:
+    model = _load_whisper()
+
+    segments, info = model.transcribe(
+        audio_path,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
+    )
+
     return [
         {
-            "start": seg["start"],
-            "end": seg["end"],
-            "text": seg["text"].strip(),
+            "start": round(float(seg.start), 3),
+            "end": round(float(seg.end), 3),
+            "text": seg.text.strip(),
         }
-        for seg in result["segments"]
+        for seg in segments
     ]
 
 
@@ -271,7 +291,6 @@ Rules:
 
 
 def ask_deepseek(transcript: list[dict], user_prompt: str) -> str:
-    """Send transcript + prompt to DeepSeek‑R1 via Ollama. Returns raw text."""
     client = ollama.Client(host=OLLAMA_HOST)
 
     response = client.chat(
@@ -294,12 +313,9 @@ def ask_deepseek(transcript: list[dict], user_prompt: str) -> str:
 
 
 def parse_cut_list(raw: str) -> list[dict]:
-    """Extract the JSON object from DeepSeek's reply (it may include <think> tags)."""
-    # Strip reasoning block
     import re
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip()
 
-    # Find first { ... } block
     match = re.search(r"\{[\s\S]*\}", cleaned)
     if not match:
         return []
@@ -341,8 +357,8 @@ async def process_video(request: Request):
         raise HTTPException(404, f"File not found: {src}")
 
     async def generate() -> Generator[str, None, None]:
+        audio_path = None
         try:
-            # 1. FFmpeg check
             if not ffmpeg_available():
                 yield sse_event({
                     "type": "think",
@@ -353,17 +369,23 @@ async def process_video(request: Request):
             yield sse_event({"type": "think", "text": "🔊 Extracting audio track…"})
 
             audio_path = tempfile.mktemp(suffix=".wav")
-            extract_audio(str(src), audio_path)
-
-            # 2. Whisper transcription
-            yield sse_event({"type": "think", "text": "📝 Transcribing speech with Whisper…"})
-
             loop = asyncio.get_event_loop()
-            transcript = await loop.run_in_executor(None, transcribe_audio, audio_path)
+            await loop.run_in_executor(None, extract_audio, str(src), audio_path)
+
+            yield sse_event({
+                "type": "think",
+                "text": f"📝 Transcribing speech with faster-whisper ({WHISPER_MODEL})… (first run downloads the model, ~150 MB)",
+            })
+
+            transcript = await loop.run_in_executor(
+                None, transcribe_audio, audio_path
+            )
 
             if not transcript:
-                yield sse_event({"type": "think", "text": "⚠️ No speech detected in the video."})
-                os.unlink(audio_path)
+                yield sse_event({
+                    "type": "think",
+                    "text": "⚠️ No speech detected in the video.",
+                })
                 return
 
             yield sse_event({
@@ -371,15 +393,12 @@ async def process_video(request: Request):
                 "text": f"✅ Transcribed {len(transcript)} segments. Sending to DeepSeek‑R1…",
             })
 
-            # 3. DeepSeek reasoning
             raw = await loop.run_in_executor(
                 None, ask_deepseek, transcript, prompt
             )
 
-            # Stream the raw thinking + answer back
             yield sse_event({"type": "think", "text": raw})
 
-            # 4. Parse cut list
             cuts = parse_cut_list(raw)
 
             if not cuts:
@@ -390,7 +409,6 @@ async def process_video(request: Request):
                 output_name = f"edited_{filename}"
                 shutil.copy(str(src), str(src_dir / output_name))
                 yield sse_event({"type": "done", "output": output_name})
-                os.unlink(audio_path)
                 return
 
             yield sse_event({
@@ -398,14 +416,11 @@ async def process_video(request: Request):
                 "text": f"✂️ Cutting {len(cuts)} segments with FFmpeg…",
             })
 
-            # 5. FFmpeg slice
             output_name = f"edited_{filename}"
             output_path = src_dir / output_name
             await loop.run_in_executor(
                 None, cut_and_concat, str(src), cuts, str(output_path)
             )
-
-            os.unlink(audio_path)
 
             yield sse_event({
                 "type": "done",
@@ -418,6 +433,12 @@ async def process_video(request: Request):
                 "type": "think",
                 "text": f"❌ Error: {exc}",
             })
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.unlink(audio_path)
+                except OSError:
+                    pass
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -450,7 +471,6 @@ async def stream_video(filename: str, request: Request):
     range_header = request.headers.get("range")
 
     if range_header:
-        # e.g. "bytes=0-1023"
         try:
             _, rng = range_header.split("=")
             start_s, end_s = rng.split("-")
@@ -474,7 +494,6 @@ async def stream_video(filename: str, request: Request):
             headers=headers,
         )
 
-    # Full file
     return FileResponse(
         file_path,
         media_type="video/mp4",
@@ -490,9 +509,10 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("  🎬  Local Video Editor Backend")
     print(f"  📁  Video folder: {RUNTIME['video_dir']}")
-    print(f"  🤖  Model: {DEEPSEEK_MODEL}")
-    print(f"  🌐  API: http://localhost:8000")
-    print(f"  📖  Docs: http://localhost:8000/docs")
+    print(f"  🤖  LLM:   {DEEPSEEK_MODEL}")
+    print(f"  🎙️   ASR:   faster-whisper ({WHISPER_MODEL})")
+    print(f"  🌐  API:   http://localhost:8000")
+    print(f"  📖  Docs:  http://localhost:8000/docs")
     print("=" * 60 + "\n")
 
     uvicorn.run(
