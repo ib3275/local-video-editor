@@ -25,45 +25,58 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
   if (os === 'windows') {
     const repoQuoted = quotePath(p, 'windows')
     const backendQuoted = quotePath(`${p}\\backend`, 'windows')
-    // quotePath already wraps paths with spaces in single quotes — do NOT
-    // add extra quotes in the template below, or you get ''path'' bugs.
     const modelsQuoted = quotePath(`${p}\\ollama-models`, 'windows')
 
     return {
       full:
+        // 1. Install prerequisites first (idempotent)
+        `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements; ` +
+        `winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements; ` +
+        `winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements; ` +
+
+        // 2. Refresh PATH so newly-installed tools are usable in this session
+        `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
+
+        // 3. Allow venv activation for this shell only
+        `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
+
+        // 4. Clone FIRST — before creating any subfolders, or git clone refuses
+        //    a non-empty destination.
+        `if (-not (Test-Path (Join-Path ${repoQuoted} '.git'))) { ` +
+          `if (Test-Path ${repoQuoted}) { Remove-Item -Recurse -Force ${repoQuoted} }; ` +
+          `git clone ${REPO_URL} ${repoQuoted} ` +
+        `}; ` +
+
+        // 5. NOW create the models folder + set OLLAMA_MODELS
         `$modelsPath = ${modelsQuoted}; ` +
         `New-Item -ItemType Directory -Force -Path $modelsPath | Out-Null; ` +
         `[Environment]::SetEnvironmentVariable('OLLAMA_MODELS', $modelsPath, 'User'); ` +
         `$env:OLLAMA_MODELS = $modelsPath; ` +
 
-        `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements; ` +
-        `winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements; ` +
-        `winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements; ` +
-
-        `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
-
-        `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
-
-        `if (-not (Test-Path ${repoQuoted})) { git clone ${REPO_URL} ${repoQuoted} }; ` +
-
+        // 6. Restart Ollama so it inherits the new model path
         `Get-Process -Name 'ollama*' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
         `Start-Sleep -Milliseconds 800; ` +
-        `Start-Process "$env:LOCALAPPDATA\\Programs\\Ollama\\ollama app.exe" -ErrorAction SilentlyContinue; ` +
+        `Start-Process -WindowStyle Hidden -FilePath 'ollama' -ArgumentList 'serve' -ErrorAction SilentlyContinue; ` +
         `Start-Sleep -Seconds 5; ` +
 
+        // 7. Pull the model — lands in the folder we just configured
         `ollama pull ${MODEL_NAME}; ` +
 
+        // 8. Backend setup
         `cd ${backendQuoted}; ` +
         `py -3 -m venv .venv; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python -m pip install --upgrade pip; ` +
         `python -m pip install -r requirements.txt; ` +
 
+        // 9. Launch
         `python main.py`,
 
       restart:
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
         `$env:OLLAMA_MODELS = ${modelsQuoted}; ` +
+        `Start-Process -WindowStyle Hidden -FilePath 'ollama' -ArgumentList 'serve' -ErrorAction SilentlyContinue; ` +
+        `Start-Sleep -Seconds 3; ` +
         `cd ${backendQuoted}; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python main.py`,
@@ -76,25 +89,43 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
 
   return {
     full:
-      `export OLLAMA_MODELS=${modelsQuoted}; ` +
-      `mkdir -p "$OLLAMA_MODELS"; ` +
-      `grep -q "OLLAMA_MODELS" ~/.zshrc 2>/dev/null || echo "export OLLAMA_MODELS=${modelsQuoted}" >> ~/.zshrc; ` +
+      // 1. Install prerequisites
       `brew install ffmpeg ollama python@3.12; ` +
-      `if [ ! -d ${repoQuoted} ]; then git clone ${REPO_URL} ${repoQuoted}; fi; ` +
+
+      // 2. Clone FIRST, before creating the models folder
+      `if [ ! -d ${repoQuoted}/.git ]; then ` +
+        `rm -rf ${repoQuoted}; ` +
+        `git clone ${REPO_URL} ${repoQuoted}; ` +
+      `fi; ` +
+
+      // 3. Create models folder + persist OLLAMA_MODELS
+      `mkdir -p ${modelsQuoted}; ` +
+      `export OLLAMA_MODELS=${modelsQuoted}; ` +
+      `grep -q "OLLAMA_MODELS" ~/.zshrc 2>/dev/null || echo 'export OLLAMA_MODELS='${modelsQuoted} >> ~/.zshrc; ` +
+
+      // 4. Restart Ollama detached (nohup + disown so it survives terminal close)
       `pkill -f "ollama serve" 2>/dev/null || true; ` +
       `sleep 1; ` +
-      `(ollama serve > /dev/null 2>&1 &); ` +
+      `nohup ollama serve > /dev/null 2>&1 & disown; ` +
       `sleep 4; ` +
+
+      // 5. Pull the model
       `ollama pull ${MODEL_NAME}; ` +
+
+      // 6. Backend setup
       `cd ${backendQuoted}; ` +
       `python3 -m venv .venv; ` +
       `source .venv/bin/activate; ` +
       `python3 -m pip install --upgrade pip; ` +
       `python3 -m pip install -r requirements.txt; ` +
+
+      // 7. Launch
       `python3 main.py`,
 
     restart:
       `export OLLAMA_MODELS=${modelsQuoted}; ` +
+      `nohup ollama serve > /dev/null 2>&1 & disown; ` +
+      `sleep 3; ` +
       `cd ${backendQuoted}; ` +
       `source .venv/bin/activate; ` +
       `python3 main.py`,
