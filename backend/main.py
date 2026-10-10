@@ -1,6 +1,6 @@
 """
-Local Video Editor — Companion Backend
-Entry point. Thin — all logic lives in the packages under this folder.
+Local Video Editor -- Companion Backend
+Entry point. Thin -- all logic lives in the packages under this folder.
 """
 
 import uvicorn
@@ -37,12 +37,12 @@ app.include_router(process.router)
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print(f"  🎬  Local Video Editor Backend v{VERSION}")
-    print(f"  📁  Video folder: {RUNTIME['video_dir']}")
-    print(f"  🤖  LLM:   {DEEPSEEK_MODEL}")
-    print(f"  🎙️   ASR:   faster-whisper ({WHISPER_MODEL})")
-    print(f"  🔇  Silence: < {SILENCE_NOISE_DB}dB for {SILENCE_MIN_DURATION}s")
-    print(f"  🌐  API:   http://localhost:8000")
+    print(f"  Local Video Editor Backend v{VERSION}")
+    print(f"  Video folder: {RUNTIME['video_dir']}")
+    print(f"  LLM:   {DEEPSEEK_MODEL}")
+    print(f"  ASR:   faster-whisper ({WHISPER_MODEL})")
+    print(f"  Silence: < {SILENCE_NOISE_DB}dB for {SILENCE_MIN_DURATION}s")
+    print(f"  API:   http://localhost:8000")
     print("=" * 60 + "\n")
 
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

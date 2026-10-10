@@ -37,35 +37,35 @@ async def process_video(request: Request):
         audio_path = None
         try:
             if not ffmpeg_available():
-                yield sse_event({"type": "think", "text": "? FFmpeg not found."})
+                yield sse_event({"type": "think", "text": "[ERROR] FFmpeg not found."})
                 return
             loop = asyncio.get_event_loop()
 
-            yield sse_event({"type": "think", "text": "?? Scanning audio loudness…"})
+            yield sse_event({"type": "think", "text": "[AUDIO] Scanning audio loudness..."})
             loud = await loop.run_in_executor(None, detect_loud_segments, str(src))
-            yield sse_event({"type": "think", "text": f"? Found {len(loud)} loud segments."})
+            yield sse_event({"type": "think", "text": f"[OK] Found {len(loud)} loud segments."})
 
-            yield sse_event({"type": "think", "text": "?? Detecting scene changes…"})
+            yield sse_event({"type": "think", "text": "[SCENE] Detecting scene changes..."})
             scenes = await loop.run_in_executor(None, detect_scenes, str(src))
-            yield sse_event({"type": "think", "text": f"? Found {len(scenes)} scenes."})
+            yield sse_event({"type": "think", "text": f"[OK] Found {len(scenes)} scenes."})
 
             audio_path = tempfile.mktemp(suffix=".wav")
             await loop.run_in_executor(None, extract_audio, str(src), audio_path)
-            yield sse_event({"type": "think", "text": "?? Transcribing speech…"})
+            yield sse_event({"type": "think", "text": "[ASR] Transcribing speech..."})
             transcript = await loop.run_in_executor(None, transcribe_audio, audio_path)
             if transcript:
-                yield sse_event({"type": "think", "text": f"? {len(transcript)} speech segments."})
+                yield sse_event({"type": "think", "text": f"[OK] {len(transcript)} speech segments."})
             else:
-                yield sse_event({"type": "think", "text": "?? No speech detected — using loudness + scenes only."})
+                yield sse_event({"type": "think", "text": "[INFO] No speech detected -- using loudness + scenes only."})
 
             timeline = build_timeline(loud, scenes, transcript)
-            yield sse_event({"type": "think", "text": f"?? Sending timeline to DeepSeek-R1 ({timeline['summary']})…"})
+            yield sse_event({"type": "think", "text": f"[LLM] Sending timeline to DeepSeek-R1 ({timeline['summary']})..."})
             raw = await loop.run_in_executor(None, ask_deepseek, timeline, prompt)
             yield sse_event({"type": "think", "text": raw})
 
             cuts = parse_cut_list(raw)
             if not cuts:
-                yield sse_event({"type": "think", "text": "?? Could not parse cut list. Falling back to loud segments."})
+                yield sse_event({"type": "think", "text": "[WARN] Could not parse cut list. Falling back to loud segments."})
                 cuts = [{"start": s["start"], "end": s["end"]} for s in loud]
                 if not cuts:
                     output_name = f"edited_{filename}"
@@ -73,13 +73,13 @@ async def process_video(request: Request):
                     yield sse_event({"type": "done", "output": output_name})
                     return
 
-            yield sse_event({"type": "think", "text": f"?? Cutting {len(cuts)} segments with FFmpeg…"})
+            yield sse_event({"type": "think", "text": f"[CUT] Cutting {len(cuts)} segments with FFmpeg..."})
             output_name = f"edited_{filename}"
             output_path = src_dir / output_name
             await loop.run_in_executor(None, cut_and_concat, str(src), cuts, str(output_path))
             yield sse_event({"type": "done", "output": output_name, "segments_kept": len(cuts)})
         except Exception as exc:
-            yield sse_event({"type": "think", "text": f"? Error: {exc}"})
+            yield sse_event({"type": "think", "text": f"[ERROR] {exc}"})
         finally:
             if audio_path and os.path.exists(audio_path):
                 try: os.unlink(audio_path)
