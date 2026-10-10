@@ -23,9 +23,11 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
   const p = (installPath || 'local-editor').replace(/[/\\]+$/, '')
 
   if (os === 'windows') {
-    const repoQuoted = quotePath(p, 'windows')
-    const backendQuoted = quotePath(`${p}\\backend`, 'windows')
-    const modelsQuoted = quotePath(`${p}\\ollama-models`, 'windows')
+    // Build full paths FIRST, then quote the whole thing.
+    const repoQuoted        = quotePath(p, 'windows')
+    const backendQuoted     = quotePath(`${p}\\backend`, 'windows')
+    const modelsQuoted      = quotePath(`${p}\\ollama-models`, 'windows')
+    const tmpQuoted         = quotePath(`${p}.tmp-clone`, 'windows')
 
     return {
       full:
@@ -37,23 +39,20 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
         // 2. PATH refresh
         `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
 
-        // 3. ExecutionPolicy for venv activation
+        // 3. ExecutionPolicy for this session
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
 
-        // 4. Refresh code if no .git present. Preserve ollama-models at all costs.
-        //    git clone refuses a non-empty destination, so we clone to a temp
-        //    sibling then move files in — ollama-models is never touched.
+        // 4. Refresh code if .git missing. Preserve ollama-models at all costs.
         `if (-not (Test-Path (Join-Path ${repoQuoted} '.git'))) { ` +
           `if (Test-Path ${repoQuoted}) { ` +
             `Get-ChildItem ${repoQuoted} -Exclude 'ollama-models' -Force | Remove-Item -Recurse -Force; ` +
           `} else { ` +
             `New-Item -ItemType Directory -Force -Path ${repoQuoted} | Out-Null; ` +
           `}; ` +
-          `$tmp = "${repoQuoted}.tmp-clone"; ` +
-          `if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }; ` +
-          `git clone ${REPO_URL} $tmp; ` +
-          `Get-ChildItem $tmp -Force | Move-Item -Destination ${repoQuoted}; ` +
-          `Remove-Item -Recurse -Force $tmp ` +
+          `if (Test-Path ${tmpQuoted}) { Remove-Item -Recurse -Force ${tmpQuoted} }; ` +
+          `git clone ${REPO_URL} ${tmpQuoted}; ` +
+          `Get-ChildItem ${tmpQuoted} -Force | Move-Item -Destination ${repoQuoted}; ` +
+          `Remove-Item -Recurse -Force ${tmpQuoted} ` +
         `}; ` +
 
         // 5. Models folder + env var
@@ -62,13 +61,13 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
         `[Environment]::SetEnvironmentVariable('OLLAMA_MODELS', $modelsPath, 'User'); ` +
         `$env:OLLAMA_MODELS = $modelsPath; ` +
 
-        // 6. Restart Ollama hidden so it inherits OLLAMA_MODELS
+        // 6. Restart Ollama hidden
         `Get-Process -Name 'ollama*' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
         `Start-Sleep -Milliseconds 800; ` +
         `Start-Process -WindowStyle Hidden -FilePath 'ollama' -ArgumentList 'serve' -ErrorAction SilentlyContinue; ` +
         `Start-Sleep -Seconds 5; ` +
 
-        // 7. Model (instant no-op if already present)
+        // 7. Model (instant if already present)
         `ollama pull ${MODEL_NAME}; ` +
 
         // 8. Backend
@@ -92,10 +91,11 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
     }
   }
 
-  // macOS / Linux — full replacement, preserving models on re-clone
-  const repoQuoted = quotePath(p, 'mac')
+  // macOS / Linux
+  const repoQuoted    = quotePath(p, 'mac')
   const backendQuoted = quotePath(`${p}/backend`, 'mac')
-  const modelsQuoted = quotePath(`${p}/ollama-models`, 'mac')
+  const modelsQuoted  = quotePath(`${p}/ollama-models`, 'mac')
+  const tmpQuoted     = quotePath(`${p}.tmp-clone`, 'mac')
 
   return {
     full:
@@ -106,11 +106,10 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
         `else ` +
           `mkdir -p ${repoQuoted}; ` +
         `fi; ` +
-        `tmp="${repoQuoted}.tmp-clone"; ` +
-        `rm -rf "$tmp"; ` +
-        `git clone ${REPO_URL} "$tmp"; ` +
-        `mv "$tmp"/* "$tmp"/.[!.]* ${repoQuoted}/ 2>/dev/null || true; ` +
-        `rm -rf "$tmp"; ` +
+        `rm -rf ${tmpQuoted}; ` +
+        `git clone ${REPO_URL} ${tmpQuoted}; ` +
+        `mv ${tmpQuoted}/* ${tmpQuoted}/.[!.]* ${repoQuoted}/ 2>/dev/null || true; ` +
+        `rm -rf ${tmpQuoted}; ` +
       `fi; ` +
       `mkdir -p ${modelsQuoted}; ` +
       `export OLLAMA_MODELS=${modelsQuoted}; ` +
