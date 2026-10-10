@@ -7,10 +7,8 @@ interface Props {
 
 // ⚠️ Replace ib3275 with your GitHub username if you fork this project.
 const REPO_URL = 'https://github.com/ib3275/local-video-editor.git'
+const MODEL_NAME = 'deepseek-r1:8b'
 
-// ──────────────────────────────────────────────────────────────
-//  Path quoting — makes spaces and special chars safe in shells
-// ──────────────────────────────────────────────────────────────
 function quotePath(p: string, os: 'windows' | 'mac'): string {
   if (!p) return p
   if (os === 'windows') {
@@ -25,33 +23,54 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
   const p = (installPath || 'local-editor').replace(/[/\\]+$/, '')
 
   if (os === 'windows') {
-    // Build the FULL path first, THEN quote it whole. (Old bug: quoted the
-    // folder, then tacked on \backend outside the quotes → cd saw two args.)
     const repoQuoted = quotePath(p, 'windows')
     const backendQuoted = quotePath(`${p}\\backend`, 'windows')
+    const modelsQuoted = quotePath(`${p}\\ollama-models`, 'windows')
 
     return {
       full:
-        // 1. Install prerequisites (idempotent — skips if already present)
+        // 1. Point Ollama's model storage at the chosen path BEFORE installing
+        `$modelsPath = '${modelsQuoted}'; ` +
+        `New-Item -ItemType Directory -Force -Path $modelsPath | Out-Null; ` +
+        `[Environment]::SetEnvironmentVariable('OLLAMA_MODELS', $modelsPath, 'User'); ` +
+        `$env:OLLAMA_MODELS = $modelsPath; ` +
+
+        // 2. Install prerequisites (idempotent)
         `winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements; ` +
         `winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements; ` +
         `winget install -e --id Ollama.Ollama --accept-source-agreements --accept-package-agreements; ` +
-        // 2. Refresh PATH in this session so freshly-installed tools are visible
+
+        // 3. Refresh PATH in this session
         `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User"); ` +
-        // 3. Allow venv activation for this shell only (default policy blocks it)
+
+        // 4. Allow venv activation for this shell only
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
-        // 4. Clone only if the folder doesn't exist yet
+
+        // 5. Clone (skip if exists)
         `if (-not (Test-Path ${repoQuoted})) { git clone ${REPO_URL} ${repoQuoted} }; ` +
-        // 5. Enter backend, create venv via py launcher (bypasses Windows
-        //    Store python.exe alias stub that breaks `python` for new users)
+
+        // 6. Restart Ollama so it inherits the new OLLAMA_MODELS value
+        `Get-Process -Name 'ollama*' -ErrorAction SilentlyContinue | Stop-Process -Force; ` +
+        `Start-Sleep -Milliseconds 800; ` +
+        `Start-Process "$env:LOCALAPPDATA\\Programs\\Ollama\\ollama app.exe" -ErrorAction SilentlyContinue; ` +
+        `Start-Sleep -Seconds 5; ` +
+
+        // 7. Pull the DeepSeek model — lands in the folder we just configured
+        `ollama pull ${MODEL_NAME}; ` +
+
+        // 8. Backend: create venv, install deps
         `cd ${backendQuoted}; ` +
         `py -3 -m venv .venv; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python -m pip install --upgrade pip; ` +
         `python -m pip install -r requirements.txt; ` +
+
+        // 9. Launch
         `python main.py`,
+
       restart:
         `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; ` +
+        `$env:OLLAMA_MODELS = '${modelsQuoted}'; ` +
         `cd ${backendQuoted}; ` +
         `.\\.venv\\Scripts\\Activate.ps1; ` +
         `python main.py`,
@@ -61,27 +80,35 @@ function buildCommands(installPath: string, os: 'windows' | 'mac') {
   // macOS / Linux
   const repoQuoted = quotePath(p, 'mac')
   const backendQuoted = quotePath(`${p}/backend`, 'mac')
+  const modelsQuoted = quotePath(`${p}/ollama-models`, 'mac')
 
   return {
     full:
+      `export OLLAMA_MODELS=${modelsQuoted}; ` +
+      `mkdir -p "$OLLAMA_MODELS"; ` +
+      `grep -q "OLLAMA_MODELS" ~/.zshrc 2>/dev/null || echo "export OLLAMA_MODELS=${modelsQuoted}" >> ~/.zshrc; ` +
       `brew install ffmpeg ollama python@3.12; ` +
       `if [ ! -d ${repoQuoted} ]; then git clone ${REPO_URL} ${repoQuoted}; fi; ` +
+      `pkill -f "ollama serve" 2>/dev/null || true; ` +
+      `sleep 1; ` +
+      `(ollama serve > /dev/null 2>&1 &); ` +
+      `sleep 4; ` +
+      `ollama pull ${MODEL_NAME}; ` +
       `cd ${backendQuoted}; ` +
       `python3 -m venv .venv; ` +
       `source .venv/bin/activate; ` +
       `python3 -m pip install --upgrade pip; ` +
       `python3 -m pip install -r requirements.txt; ` +
       `python3 main.py`,
+
     restart:
+      `export OLLAMA_MODELS=${modelsQuoted}; ` +
       `cd ${backendQuoted}; ` +
       `source .venv/bin/activate; ` +
       `python3 main.py`,
   }
 }
 
-// ──────────────────────────────────────────────────────────────
-//  Component
-// ──────────────────────────────────────────────────────────────
 export default function TerminalInstaller({ onComplete, backendReady }: Props) {
   const [os, setOs] = useState<'windows' | 'mac'>('windows')
   const [installPath, setInstallPath] = useState('local-editor')
@@ -112,23 +139,21 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
       const text = (await navigator.clipboard.readText()).trim()
       if (text) setInstallPath(text.replace(/[/\\]+$/, ''))
     } catch {
-      // Permission denied or unsupported — user can Ctrl+V manually
+      // Permission denied or unsupported
     }
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div>
         <h2 className="text-2xl font-semibold">Install the editor engine</h2>
         <p className="text-slate-400 mt-2">
           Copy the command below, paste it into your terminal, and press Enter.
-          This is a one-time setup. The engine runs quietly in the background
-          afterwards.
+          That's the whole setup — Python, FFmpeg, Ollama, the AI model, and the
+          engine all install themselves in one go. One-time only.
         </p>
       </div>
 
-      {/* OS toggle */}
       <div className="flex gap-2">
         {(['windows', 'mac'] as const).map((o) => (
           <button
@@ -142,13 +167,12 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
         ))}
       </div>
 
-      {/* Install location */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
         <div className="flex items-center gap-2 mb-2">
-          <label className="font-medium">Where should the engine live?</label>
+          <label className="font-medium">Where should the engine and its AI live?</label>
           <span
             className="text-cyan-400 cursor-help"
-            title="The folder where the engine's code and its AI runtime are stored. Defaults to a 'local-editor' folder inside your current terminal directory."
+            title="The folder that will hold the engine's code plus the AI model files (about 5 GB). Pick a drive with plenty of free space."
           >
             ❓
           </span>
@@ -175,13 +199,12 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
         </div>
 
         <p className="text-xs text-slate-500 mt-2">
-          Leave as-is for a simple install. Or copy a folder path from File
-          Explorer (Windows: click the address bar, Ctrl+C) / Finder (Mac: right‑click
-          the folder → <em>Copy as Pathname</em>) and click Paste above.
+          Everything — engine code and ~5 GB of AI — lands here. Defaults to a
+          <code className="text-slate-400 mx-1">local-editor</code> folder in
+          your current terminal directory.
         </p>
       </div>
 
-      {/* Why-no-Browse info box */}
       {showInfoBox && (
         <div className="bg-cyan-950/40 border border-cyan-800 rounded-xl p-4 text-sm">
           <div className="flex items-start gap-3">
@@ -191,11 +214,10 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
                 Why isn't there a Browse button here?
               </p>
               <p className="text-cyan-200/80 text-xs leading-relaxed">
-                Your browser can't open a native folder picker until the engine
-                is running — that's a security rule every browser enforces. Type
-                or paste the path above instead. Once installation finishes, all
-                future folder pickers (like the next step) will be the real
-                native ones.
+                Browsers can't open a native folder picker until the engine is
+                running — that's a security rule every browser enforces. Paste
+                a path above instead. Once installation finishes, later folder
+                pickers in this wizard will be real native ones.
               </p>
             </div>
             <button
@@ -209,10 +231,9 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
         </div>
       )}
 
-      {/* Command box */}
       <div>
         <div className="flex items-center justify-between mb-2">
-          <span className="text-sm text-slate-400">Your install command</span>
+          <span className="text-sm text-slate-400">Your one-line installer</span>
           <button
             onClick={() => copy(cmds.full, 'full')}
             className="px-3 py-1.5 rounded-lg text-xs font-semibold
@@ -221,14 +242,13 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
             {copied === 'full' ? '✓ Copied!' : '📋 Copy full command'}
           </button>
         </div>
-        <div className="bg-black rounded-xl p-4 font-mono text-xs sm:text-sm overflow-x-auto">
+        <div className="bg-black rounded-xl p-4 font-mono text-xs sm:text-sm overflow-x-auto max-h-64 overflow-y-auto">
           <pre className="text-emerald-400 whitespace-pre-wrap break-all leading-relaxed">
             {cmds.full}
           </pre>
         </div>
       </div>
 
-      {/* Visual guide */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {[
           {
@@ -249,9 +269,9 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
           },
           {
             n: '3',
-            title: 'Keep it open',
+            title: 'Wait ~10 minutes',
             desc:
-              'Do not close that window. It is the engine powering this page.',
+              'It installs tools, downloads ~5 GB of AI, and starts the engine. Do not close the window.',
           },
         ].map((s) => (
           <div key={s.n} className="bg-slate-900 border border-slate-800 rounded-xl p-4">
@@ -264,7 +284,6 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
         ))}
       </div>
 
-      {/* Restart shortcut for returning users */}
       <div className="border border-slate-800 rounded-xl overflow-hidden">
         <button
           onClick={() => setShowRestart((v) => !v)}
@@ -280,8 +299,8 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
         {showRestart && (
           <div className="px-4 pb-4 border-t border-slate-800 bg-slate-900/50">
             <p className="text-xs text-slate-400 my-3">
-              Use this if you've already run the install once and just need to
-              start the engine again.
+              Use this if the install is already done and you just need to start
+              the engine again.
             </p>
             <div className="bg-black rounded-lg p-3 font-mono text-xs overflow-x-auto relative">
               <pre className="text-emerald-400 whitespace-pre-wrap break-all pr-24">
@@ -299,7 +318,6 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
         )}
       </div>
 
-      {/* Live connection status */}
       <div
         className={`rounded-xl border p-4 transition-colors
           ${backendReady
@@ -325,7 +343,7 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
                   Waiting for your engine to start…
                 </p>
                 <p className="text-xs text-amber-300/80">
-                  This page checks every 2 seconds. First run downloads ~7 GB — give it a few minutes.
+                  This page checks every 2 seconds. First run downloads ~5 GB — give it a few minutes.
                 </p>
               </div>
             </>
@@ -350,19 +368,12 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
               <strong>still open</strong>. Closing it stops the engine.
             </li>
             <li>
-              If you saw <em>"Python was not found; run without arguments to
-              install from the Microsoft Store"</em>, that's the Windows Store
-              alias stub — not a real Python. The command already installs
-              Python via winget; just close and reopen your terminal, then
-              re-run the command.
+              If you saw <em>"Python was not found"</em>, close and reopen the
+              terminal, then re-run the same command.
             </li>
             <li>
-              Look at that terminal — if you see a red error, copy the last few
-              lines and search them online.
-            </li>
-            <li>
-              First-time setup downloads about <strong>7 GB</strong> (AI model +
-              dependencies). It can take 5–15 minutes on slow connections.
+              First-time setup downloads about <strong>5 GB</strong> — the AI
+              model. Slow connections can take 15+ minutes.
             </li>
             <li>
               When you see{' '}
@@ -371,15 +382,10 @@ export default function TerminalInstaller({ onComplete, backendReady }: Props) {
               </code>
               , you're live.
             </li>
-            <li>
-              Try refreshing this page once. If the engine is up, the badge
-              below should flip green within 2 seconds.
-            </li>
           </ul>
         )}
       </div>
 
-      {/* Continue button — gated on backend */}
       <button
         onClick={onComplete}
         disabled={!backendReady}

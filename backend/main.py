@@ -20,7 +20,6 @@ import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 import ollama
 from faster_whisper import WhisperModel
 
@@ -41,7 +40,7 @@ DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 #  APP
 # ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Local Video Editor Backend", version="1.1.0")
+app = FastAPI(title="Local Video Editor Backend", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -206,11 +205,7 @@ def extract_audio(video_path: str, audio_path: str) -> None:
     )
 
 
-def cut_and_concat(
-    video_path: str,
-    segments: list[dict],
-    output_path: str,
-) -> None:
+def cut_and_concat(video_path: str, segments: list, output_path: str) -> None:
     if not segments:
         shutil.copy(video_path, output_path)
         return
@@ -252,7 +247,7 @@ def _load_whisper() -> WhisperModel:
     return _whisper_cache
 
 
-def transcribe_audio(audio_path: str) -> list[dict]:
+def transcribe_audio(audio_path: str) -> list:
     model = _load_whisper()
 
     segments, info = model.transcribe(
@@ -273,10 +268,10 @@ def transcribe_audio(audio_path: str) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────
-#  DEEPSEEK‑R1 TIMESTAMP PARSER
+#  DEEPSEEK-R1 TIMESTAMP PARSER
 # ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a precise video‑editing assistant.
+SYSTEM_PROMPT = """You are a precise video-editing assistant.
 You will receive a JSON array of transcript segments with start/end times.
 You will also receive a user instruction describing what to cut.
 
@@ -290,7 +285,7 @@ Rules:
 """
 
 
-def ask_deepseek(transcript: list[dict], user_prompt: str) -> str:
+def ask_deepseek(transcript: list, user_prompt: str) -> str:
     client = ollama.Client(host=OLLAMA_HOST)
 
     response = client.chat(
@@ -312,7 +307,7 @@ def ask_deepseek(transcript: list[dict], user_prompt: str) -> str:
     return response["message"]["content"]
 
 
-def parse_cut_list(raw: str) -> list[dict]:
+def parse_cut_list(raw: str) -> list:
     import re
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip()
 
@@ -390,7 +385,7 @@ async def process_video(request: Request):
 
             yield sse_event({
                 "type": "think",
-                "text": f"✅ Transcribed {len(transcript)} segments. Sending to DeepSeek‑R1…",
+                "text": f"✅ Transcribed {len(transcript)} segments. Sending to DeepSeek-R1…",
             })
 
             raw = await loop.run_in_executor(
@@ -444,7 +439,7 @@ async def process_video(request: Request):
 
 
 # ──────────────────────────────────────────────────────────────
-#  STREAM VIDEO  (Range‑request aware)
+#  STREAM VIDEO  (Range-request aware)
 # ──────────────────────────────────────────────────────────────
 
 def _range_stream(path: Path, start: int, end: int, chunk: int = 1024 * 1024):
